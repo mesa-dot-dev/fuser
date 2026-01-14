@@ -259,14 +259,22 @@ pub(crate) struct fuse_mkdir_in {
     pub(crate) umask: u32,
 }
 
+/// Rename request structure (8 bytes).
+///
+/// On macOS with macFUSE, we request FUSE_RENAME_SWAP and FUSE_RENAME_EXCL
+/// capabilities during init. If granted, the kernel sends an extended 16-byte
+/// format (this struct plus flags: u32 + padding: u32). We use runtime detection
+/// to handle both formats, allowing compatibility across macFUSE versions.
+///
+/// Linux has FUSE_RENAME2 as a separate opcode for extended renames.
+///
+/// See:
+/// - Header: https://github.com/osxfuse/fuse/blob/master/include/fuse_kernel.h
+/// - Issue: https://github.com/osxfuse/osxfuse/issues/839
 #[repr(C)]
 #[derive(Debug, FromBytes, KnownLayout, Immutable)]
 pub(crate) struct fuse_rename_in {
     pub(crate) newdir: u64,
-    #[cfg(feature = "macfuse-4-compat")]
-    pub(crate) flags: u32,
-    #[cfg(feature = "macfuse-4-compat")]
-    pub(crate) padding: u32,
 }
 
 #[repr(C)]

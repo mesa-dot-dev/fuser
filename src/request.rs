@@ -213,7 +213,7 @@ impl<'a> RequestWithSender<'a> {
                     x.src().name.as_ref(),
                     x.dest().dir,
                     x.dest().name.as_ref(),
-                    RenameFlags::empty(),
+                    RenameFlags::from_bits_retain(x.flags()),
                     self.reply(),
                 );
             }

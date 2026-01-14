@@ -93,6 +93,12 @@ bitflags! {
         /// kernel supports request timeout
         const FUSE_REQUEST_TIMEOUT = 1 << 42;
 
+        /// enable atomic rename swap
+        #[cfg(target_os = "macos")]
+        const FUSE_RENAME_SWAP = 1 << 25;
+        /// enable rename fail-if-exists
+        #[cfg(target_os = "macos")]
+        const FUSE_RENAME_EXCL = 1 << 26;
         /// pre-allocate space for a file
         #[cfg(target_os = "macos")]
         const FUSE_ALLOCATE = 1 << 27;
