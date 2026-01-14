@@ -15,10 +15,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::{io, ops::DerefMut};
 
-use crate::Filesystem;
-use crate::MountOption;
 use crate::ll::fuse_abi as abi;
 use crate::request::Request;
+use crate::Filesystem;
+use crate::MountOption;
 use crate::{channel::Channel, mnt::Mount};
 use crate::{channel::ChannelSender, notify::Notifier};
 

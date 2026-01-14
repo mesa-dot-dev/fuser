@@ -11,7 +11,7 @@ use crate::FileType;
 
 use super::{Errno, FileHandle, Generation, INodeNo, fuse_abi as abi};
 use super::{Lock, RequestId};
-use smallvec::{SmallVec, smallvec};
+use smallvec::{smallvec, SmallVec};
 use zerocopy::{Immutable, IntoBytes};
 
 const INLINE_DATA_THRESHOLD: usize = size_of::<u64>() * 4;

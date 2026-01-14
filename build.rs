@@ -15,22 +15,15 @@ fn main() {
     #[cfg(feature = "libfuse")]
     {
         if cfg!(target_os = "macos") {
-            if pkg_config::Config::new()
+            pkg_config::Config::new()
                 .atleast_version("2.6.0")
-                .probe("fuse") // for macFUSE 4.x
+                .probe("fuse") // for macFUSE
                 .map_err(|e| eprintln!("{e}"))
-                .is_ok()
-            {
-                println!("cargo:rustc-cfg=fuser_mount_impl=\"libfuse2\"");
-                println!("cargo:rustc-cfg=feature=\"macfuse-4-compat\"");
-            } else {
-                pkg_config::Config::new()
-                    .atleast_version("2.6.0")
-                    .probe("osxfuse") // for osxfuse 3.x
-                    .map_err(|e| eprintln!("{e}"))
-                    .unwrap();
-                println!("cargo:rustc-cfg=fuser_mount_impl=\"libfuse2\"");
-            }
+                .unwrap();
+            println!("cargo:rustc-cfg=fuser_mount_impl=\"libfuse2\"");
+            // Note: We use runtime detection for macFUSE 4.x vs 5.x protocol differences
+            // in request.rs instead of the compile-time macfuse-4-compat feature.
+            // This allows the binary to work with both macFUSE 4.x and 5.x installations.
         } else {
             // First try to link with libfuse3
             if pkg_config::Config::new()
