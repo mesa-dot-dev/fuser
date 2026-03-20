@@ -14,6 +14,72 @@ use libc::{c_int, c_void, size_t};
 use crate::passthrough::BackingId;
 use crate::reply::ReplySender;
 
+// ---------------------------------------------------------------------------
+// FUSE-T stream-based receive
+// ---------------------------------------------------------------------------
+//
+// FUSE-T communicates over a stream socket instead of /dev/macfuseN.
+// Messages are length-prefixed: [4-byte LE length][payload].
+// The length includes the 4-byte header itself.
+//
+// A mutex serializes reads because the stream has no message boundaries
+// and concurrent reads would interleave bytes.
+
+#[cfg(fuse_t)]
+use std::sync::Mutex;
+
+#[cfg(fuse_t)]
+static FUSE_T_READ_MUTEX: Mutex<()> = Mutex::new(());
+
+/// Read exactly `buf.len()` bytes from `fd`, looping on partial reads.
+#[cfg(fuse_t)]
+fn read_exact_raw(fd: c_int, buf: &mut [u8]) -> io::Result<usize> {
+    let mut total = 0;
+    while total < buf.len() {
+        let r = unsafe {
+            libc::read(
+                fd,
+                buf[total..].as_mut_ptr() as *mut c_void,
+                (buf.len() - total) as size_t,
+            )
+        };
+        if r == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "FUSE-T: unexpected EOF while reading",
+            ));
+        } else if r < 0 {
+            return Err(io::Error::last_os_error());
+        } else {
+            total += r as usize;
+        }
+    }
+    Ok(total)
+}
+
+/// Receive a complete length-prefixed FUSE-T message from the stream socket.
+#[cfg(fuse_t)]
+fn receive_stream(fd: c_int, buffer: &mut [u8]) -> io::Result<usize> {
+    let _guard = FUSE_T_READ_MUTEX
+        .lock()
+        .expect("FUSE-T read mutex poisoned");
+
+    // Read the 4-byte little-endian length header.
+    read_exact_raw(fd, &mut buffer[..4])?;
+    let msg_len = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+
+    if msg_len < 4 || msg_len > buffer.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("FUSE-T: invalid message length {msg_len}"),
+        ));
+    }
+
+    // Read the remaining payload.
+    read_exact_raw(fd, &mut buffer[4..msg_len])?;
+    Ok(msg_len)
+}
+
 /// A raw communication channel to the FUSE kernel driver
 #[derive(Debug)]
 pub struct Channel(Arc<File>);
@@ -34,17 +100,27 @@ impl Channel {
 
     /// Receives data up to the capacity of the given buffer (can block).
     pub fn receive(&self, buffer: &mut [u8]) -> io::Result<usize> {
-        let rc = unsafe {
-            libc::read(
-                self.0.as_raw_fd(),
-                buffer.as_ptr() as *mut c_void,
-                buffer.len() as size_t,
-            )
-        };
-        if rc < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(rc as usize)
+        // FUSE-T uses a stream socket with length-prefixed messages.
+        #[cfg(fuse_t)]
+        {
+            return receive_stream(self.0.as_raw_fd(), buffer);
+        }
+
+        // macFUSE / Linux: the kernel device delivers one complete message per read().
+        #[cfg(not(fuse_t))]
+        {
+            let rc = unsafe {
+                libc::read(
+                    self.0.as_raw_fd(),
+                    buffer.as_ptr() as *mut c_void,
+                    buffer.len() as size_t,
+                )
+            };
+            if rc < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(rc as usize)
+            }
         }
     }
 

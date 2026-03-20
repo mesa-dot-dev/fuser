@@ -4,6 +4,7 @@ fn main() {
     println!(
         "cargo:rustc-check-cfg=cfg(fuser_mount_impl, values(\"pure-rust\", \"libfuse2\", \"libfuse3\"))"
     );
+    println!("cargo:rustc-check-cfg=cfg(fuse_t)");
 
     #[cfg(all(not(feature = "libfuse"), not(target_os = "linux")))]
     unimplemented!("Building without libfuse is only supported on Linux");
@@ -15,15 +16,21 @@ fn main() {
     #[cfg(feature = "libfuse")]
     {
         if cfg!(target_os = "macos") {
+            // macOS: use FUSE-T exclusively (kext-less FUSE implementation).
+            // FUSE-T uses a stream socket instead of /dev/macfuseN, so we emit
+            // cfg(fuse_t) to gate the stream-based channel receive path.
             pkg_config::Config::new()
-                .atleast_version("2.6.0")
-                .probe("fuse") // for macFUSE
-                .map_err(|e| eprintln!("{e}"))
+                .atleast_version("1.0.0")
+                .probe("fuse-t")
+                .map_err(|e| {
+                    eprintln!("{e}");
+                    eprintln!(
+                        "FUSE-T is required on macOS. Install it:\n  brew install macos-fuse-t/homebrew-cask/fuse-t"
+                    );
+                })
                 .unwrap();
             println!("cargo:rustc-cfg=fuser_mount_impl=\"libfuse2\"");
-            // Note: We use runtime detection for macFUSE 4.x vs 5.x protocol differences
-            // in request.rs instead of the compile-time macfuse-4-compat feature.
-            // This allows the binary to work with both macFUSE 4.x and 5.x installations.
+            println!("cargo:rustc-cfg=fuse_t");
         } else {
             // First try to link with libfuse3
             if pkg_config::Config::new()
