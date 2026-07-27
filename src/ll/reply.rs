@@ -11,7 +11,7 @@ use crate::FileType;
 
 use super::{Errno, FileHandle, Generation, INodeNo, fuse_abi as abi};
 use super::{Lock, RequestId};
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use zerocopy::{Immutable, IntoBytes};
 
 const INLINE_DATA_THRESHOLD: usize = size_of::<u64>() * 4;
@@ -189,6 +189,7 @@ impl<'a> Response<'a> {
 
     // TODO: Can flags be more strongly typed?
     pub(crate) fn new_create(
+        nodeid: INodeNo,
         ttl: &Duration,
         attr: &Attr,
         generation: Generation,
@@ -201,7 +202,7 @@ impl<'a> Response<'a> {
 
         let r = abi::fuse_create_out(
             abi::fuse_entry_out {
-                nodeid: attr.attr.ino,
+                nodeid: nodeid.into(),
                 generation: generation.into(),
                 entry_valid: ttl.as_secs(),
                 attr_valid: ttl.as_secs(),
@@ -437,8 +438,7 @@ impl DirEntList {
 
 #[derive(Debug)]
 pub struct DirEntryPlus<T: AsRef<Path>> {
-    #[allow(unused)] // We use `attr.ino` instead
-    ino: INodeNo,
+    nodeid: INodeNo,
     generation: Generation,
     offset: DirEntOffset,
     name: T,
@@ -449,7 +449,7 @@ pub struct DirEntryPlus<T: AsRef<Path>> {
 
 impl<T: AsRef<Path>> DirEntryPlus<T> {
     pub fn new(
-        ino: INodeNo,
+        nodeid: INodeNo,
         generation: Generation,
         offset: DirEntOffset,
         name: T,
@@ -458,7 +458,7 @@ impl<T: AsRef<Path>> DirEntryPlus<T> {
         attr_valid: Duration,
     ) -> Self {
         Self {
-            ino,
+            nodeid,
             generation,
             offset,
             name,
@@ -491,7 +491,7 @@ impl DirEntPlusList {
         let name = x.name.as_ref().as_os_str().as_bytes();
         let header = abi::fuse_direntplus {
             entry_out: abi::fuse_entry_out {
-                nodeid: x.attr.attr.ino,
+                nodeid: x.nodeid.into(),
                 generation: x.generation.into(),
                 entry_valid: x.entry_valid.as_secs(),
                 attr_valid: x.attr_valid.as_secs(),
@@ -512,7 +512,7 @@ impl DirEntPlusList {
 
 #[cfg(test)]
 mod test {
-    use std::num::NonZeroI32;
+    use std::{mem::offset_of, num::NonZeroI32};
 
     use super::super::test::ioslice_to_vec;
     use super::*;
@@ -558,7 +558,7 @@ mod test {
         let mut expected = if cfg!(target_os = "macos") {
             vec![
                 0x98, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xef, 0xbe, 0xad, 0xde, 0x00, 0x00,
-                0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xaa, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xaa, 0x00, 0x00, 0x00,
                 0x00, 0x00, 0x00, 0x00, 0x65, 0x87, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x65, 0x87,
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0x43, 0x00, 0x00, 0x21, 0x43, 0x00, 0x00,
                 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -572,7 +572,7 @@ mod test {
         } else {
             vec![
                 0x88, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xef, 0xbe, 0xad, 0xde, 0x00, 0x00,
-                0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xaa, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xaa, 0x00, 0x00, 0x00,
                 0x00, 0x00, 0x00, 0x00, 0x65, 0x87, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x65, 0x87,
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0x43, 0x00, 0x00, 0x21, 0x43, 0x00, 0x00,
                 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -606,7 +606,7 @@ mod test {
             flags: 0x99,
             blksize: 0xbb,
         };
-        let r = Response::new_entry(INodeNo(0x11), Generation(0xaa), &attr.into(), ttl, ttl);
+        let r = Response::new_entry(INodeNo(0x44), Generation(0xaa), &attr.into(), ttl, ttl);
         assert_eq!(
             r.with_iovec(RequestId(0xdeadbeef), ioslice_to_vec),
             expected
@@ -736,7 +736,7 @@ mod test {
         let mut expected = if cfg!(target_os = "macos") {
             vec![
                 0xa8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xef, 0xbe, 0xad, 0xde, 0x00, 0x00,
-                0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xaa, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xaa, 0x00, 0x00, 0x00,
                 0x00, 0x00, 0x00, 0x00, 0x65, 0x87, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x65, 0x87,
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0x43, 0x00, 0x00, 0x21, 0x43, 0x00, 0x00,
                 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -751,7 +751,7 @@ mod test {
         } else {
             vec![
                 0x98, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xef, 0xbe, 0xad, 0xde, 0x00, 0x00,
-                0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xaa, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xaa, 0x00, 0x00, 0x00,
                 0x00, 0x00, 0x00, 0x00, 0x65, 0x87, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x65, 0x87,
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0x43, 0x00, 0x00, 0x21, 0x43, 0x00, 0x00,
                 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -791,6 +791,7 @@ mod test {
             blksize: 0xdd,
         };
         let r = Response::new_create(
+            INodeNo(0x44),
             &ttl,
             &attr.into(),
             Generation(0xaa),
@@ -888,6 +889,81 @@ mod test {
         assert_eq!(
             r.with_iovec(RequestId(0xdeadbeef), ioslice_to_vec),
             expected
+        );
+    }
+
+    #[test]
+    fn reply_directory_plus_splits_nodeid_and_rejects_oversized_entry() {
+        let time = UNIX_EPOCH + Duration::new(0x1234, 0x5678);
+        let ttl = Duration::new(0x8765, 0x4321);
+        let attr = crate::FileAttr {
+            ino: 0x1122,
+            size: 0x33,
+            blocks: 0x44,
+            atime: time,
+            mtime: time,
+            ctime: time,
+            crtime: time,
+            kind: FileType::RegularFile,
+            perm: 0o644,
+            nlink: 1,
+            uid: 0x55,
+            gid: 0x66,
+            rdev: 0,
+            flags: 0,
+            blksize: 0x1000,
+        };
+        let entry = DirEntryPlus::new(
+            INodeNo(0xaabb),
+            Generation(0xccdd),
+            DirEntOffset(1),
+            "hello",
+            ttl,
+            (&attr).into(),
+            ttl,
+        );
+
+        let mut list = DirEntPlusList::new(4096);
+        assert!(!list.push(&entry));
+        let response: Response<'_> = list.into();
+        let bytes = response.with_iovec(RequestId(0xdeadbeef), ioslice_to_vec);
+        let payload = &bytes[size_of::<abi::fuse_out_header>()..];
+        let nodeid_offset = offset_of!(abi::fuse_entry_out, nodeid);
+        let attr_ino_offset = offset_of!(abi::fuse_entry_out, attr);
+        let dirent_ino_offset = size_of::<abi::fuse_entry_out>();
+        assert_eq!(
+            u64::from_ne_bytes(
+                payload[nodeid_offset..nodeid_offset + 8]
+                    .try_into()
+                    .unwrap()
+            ),
+            0xaabb
+        );
+        assert_eq!(
+            u64::from_ne_bytes(
+                payload[attr_ino_offset..attr_ino_offset + 8]
+                    .try_into()
+                    .unwrap()
+            ),
+            attr.ino
+        );
+        assert_eq!(
+            u64::from_ne_bytes(
+                payload[dirent_ino_offset..dirent_ino_offset + 8]
+                    .try_into()
+                    .unwrap()
+            ),
+            attr.ino
+        );
+
+        let mut too_small = DirEntPlusList::new(size_of::<abi::fuse_direntplus>());
+        assert!(too_small.push(&entry));
+        let response: Response<'_> = too_small.into();
+        assert_eq!(
+            response
+                .with_iovec(RequestId(0xdeadbeef), ioslice_to_vec)
+                .len(),
+            size_of::<abi::fuse_out_header>()
         );
     }
 }
