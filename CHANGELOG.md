@@ -1,5 +1,8 @@
 # FUSE for Rust - Changelog
 
+## Unreleased
+* Allow lookup, create, and readdir-plus replies to use a kernel node ID distinct from `FileAttr::ino`
+
 ## 0.16.0 - 2025-09-12
 * Add support for passthrough file descriptors
 * Change `KernelConfig` capabilities flags parameters to `u64`
