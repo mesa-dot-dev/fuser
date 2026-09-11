@@ -1,5 +1,8 @@
 # FUSE for Rust - Changelog
 
+## Unreleased
+* Fix mounting kernel-backed filesystems with macFUSE 5.
+
 ## 0.18.0 - 2026-07-22
 * Remove deprecated feature flags `abi-*`
 * Rename `mount2()` to `mount()`
