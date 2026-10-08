@@ -112,15 +112,31 @@ unsafe impl Send for MountImpl {}
 #[cfg(target_os = "macos")]
 impl Drop for MountImpl {
     fn drop(&mut self) {
-        unsafe { fuse_unmount(self.mountpoint.as_ptr(), self.channel.as_ptr()) };
+        // fuser unmounts with unmount(2). fuse_unmount() would also ask
+        // DiskArbitration to unmount the channel's disk, which can block
+        // forever once the volume is gone. Destroying the channel closes
+        // libfuse's descriptor and marks the daemon dead, so a volume that
+        // is still mounted stops serving requests and needs a forced unmount.
+        unsafe { fuse_chan_destroy(self.channel.as_ptr()) };
     }
 }
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
+    /// Mounting tests run one at a time so that a closed descriptor number
+    /// cannot be reused by another test's device while it is being checked.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     #[ignore = "requires installed and approved macFUSE kernel backend"]
     fn mount_unmount_and_remount() -> std::io::Result<()> {
+        let _serial = serial();
         struct Filesystem(std::sync::mpsc::Sender<()>);
         impl crate::Filesystem for Filesystem {
             fn lookup(
@@ -162,5 +178,213 @@ mod tests {
             assert!(observed, "mounted filesystem never received a request");
         }
         Ok(())
+    }
+
+    unsafe extern "C" {
+        fn fuse_chan_disk(channel: *mut libc::c_void) -> *const libc::c_void;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRelease(object: *const libc::c_void);
+    }
+
+    struct Filesystem;
+    impl crate::Filesystem for Filesystem {
+        /// Opening the root, which keeps the volume busy, needs its attributes.
+        fn getattr(
+            &self,
+            _: &crate::Request,
+            ino: crate::INodeNo,
+            _: Option<crate::FileHandle>,
+            reply: crate::ReplyAttr,
+        ) {
+            let now = std::time::SystemTime::now();
+            reply.attr(
+                &std::time::Duration::ZERO,
+                &crate::FileAttr {
+                    ino,
+                    size: 0,
+                    blocks: 0,
+                    atime: now,
+                    mtime: now,
+                    ctime: now,
+                    crtime: now,
+                    kind: crate::FileType::Directory,
+                    perm: 0o700,
+                    nlink: 2,
+                    uid: nix::unistd::getuid().as_raw(),
+                    gid: nix::unistd::getgid().as_raw(),
+                    rdev: 0,
+                    blksize: 4096,
+                    flags: 0,
+                },
+            );
+        }
+    }
+
+    struct Mounted {
+        mount: crate::mnt::Mount,
+        worker: std::thread::JoinHandle<std::io::Result<()>>,
+        libfuse_fd: libc::c_int,
+        libfuse_device: (libc::dev_t, libc::ino_t, libc::dev_t),
+    }
+
+    fn mount_at(path: &std::path::Path) -> std::io::Result<Mounted> {
+        let (device, mount) = crate::mnt::Mount::new(path, &[], crate::SessionACL::Owner)?;
+        let Some(crate::mnt::MountImpl::Fuse2(inner)) = &mount.mount_impl else {
+            unreachable!("macOS mounts through libfuse2");
+        };
+        let channel = inner.channel;
+        let libfuse_fd = unsafe { super::fuse_chan_fd(channel.as_ptr()) };
+        let libfuse_device = device_identity(libfuse_fd).expect("libfuse descriptor is open");
+        let device = std::sync::Arc::try_unwrap(device).expect("device is uniquely owned");
+        let session = crate::Session::from_fd(
+            Filesystem,
+            device.0.into(),
+            crate::SessionACL::Owner,
+            crate::Config::default(),
+        )?;
+        let worker = std::thread::spawn(move || session.run());
+        // macFUSE attaches the volume's DiskArbitration disk to the channel
+        // asynchronously after mount(2) completes. The old teardown only
+        // reached DiskArbitration once the disk was attached.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10); // 10 seconds
+        loop {
+            let disk = unsafe { fuse_chan_disk(channel.as_ptr()) };
+            if !disk.is_null() {
+                unsafe { CFRelease(disk) };
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "macFUSE never attached a disk to the channel"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1)); // 1 millisecond
+        }
+        Ok(Mounted {
+            mount,
+            worker,
+            libfuse_fd,
+            libfuse_device,
+        })
+    }
+
+    fn device_identity(fd: libc::c_int) -> Option<(libc::dev_t, libc::ino_t, libc::dev_t)> {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EBADF)
+            );
+            return None;
+        }
+        let stat = unsafe { stat.assume_init() };
+        Some((stat.st_dev, stat.st_ino, stat.st_rdev))
+    }
+
+    /// Runs a teardown step off the test thread so a stuck unmount fails the
+    /// test instead of hanging it.
+    fn bounded<T: Send + 'static>(step: impl FnOnce() -> T + Send + 'static) -> T {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sender.send(step()));
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(30)) // 30 seconds
+            .expect("teardown did not finish")
+    }
+
+    /// Mounts a directory repeatedly and tears each mount down with
+    /// `teardown`. Every path must destroy libfuse's channel, closing its
+    /// original device descriptor, and leave the directory free to remount.
+    fn check_teardown(
+        teardown: fn(&std::path::Path, Mounted) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+
+        let _serial = serial();
+        // A failed teardown can leave the directory mounted, and removing it
+        // would traverse the volume, so it is only removed after success.
+        let directory = std::mem::ManuallyDrop::new(tempfile::tempdir()?);
+        let path = directory.path().canonicalize()?;
+        eprintln!("mounting at {}", path.display());
+        let parent_device = std::fs::metadata(path.parent().unwrap())?.dev();
+        for _ in 0..3 {
+            let mounted = mount_at(&path)?;
+            let (fd, device) = (mounted.libfuse_fd, mounted.libfuse_device);
+            teardown(&path, mounted)?;
+            assert_ne!(
+                device_identity(fd),
+                Some(device),
+                "libfuse descriptor leaked"
+            );
+            assert_eq!(
+                std::fs::metadata(&path)?.dev(),
+                parent_device,
+                "still mounted"
+            );
+        }
+        drop(std::mem::ManuallyDrop::into_inner(directory));
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires installed and approved macFUSE kernel backend"]
+    fn owner_unmount_destroys_libfuse_channel() -> std::io::Result<()> {
+        check_teardown(|_, Mounted { mount, worker, .. }| {
+            bounded(move || {
+                mount.umount()?;
+                worker.join().expect("session thread panicked")
+            })
+        })
+    }
+
+    /// Finder or umount(8) unmounts the volume behind the session's back.
+    #[test]
+    #[ignore = "requires installed and approved macFUSE kernel backend"]
+    fn external_unmount_destroys_libfuse_channel() -> std::io::Result<()> {
+        check_teardown(|path, Mounted { mount, worker, .. }| {
+            nix::mount::unmount(path, nix::mount::MntFlags::empty())?;
+            bounded(move || {
+                let result = worker.join().expect("session thread panicked");
+                drop(mount);
+                result
+            })
+        })
+    }
+
+    /// MountImpl::new drops the mount without unmounting it when it fails
+    /// after fuse_mount(). This drops it the same way, but after the
+    /// handshake rather than through an injected failure. The dead volume
+    /// stays mounted until it is forced off.
+    #[test]
+    #[ignore = "requires installed and approved macFUSE kernel backend"]
+    fn dropped_mount_destroys_libfuse_channel() -> std::io::Result<()> {
+        check_teardown(|path, mounted| {
+            let Mounted {
+                mut mount, worker, ..
+            } = mounted;
+            let mount_impl = mount.mount_impl.take();
+            bounded(move || {
+                drop(mount_impl);
+                worker.join().expect("session thread panicked")
+            })?;
+            drop(mount);
+            nix::mount::unmount(path, nix::mount::MntFlags::MNT_FORCE)?;
+            Ok(())
+        })
+    }
+
+    /// A busy volume refuses the owner's unmount, so the caller forces it.
+    #[test]
+    #[ignore = "requires installed and approved macFUSE kernel backend"]
+    fn forced_unmount_destroys_libfuse_channel() -> std::io::Result<()> {
+        check_teardown(|path, Mounted { mount, worker, .. }| {
+            let busy = std::fs::File::open(path)?;
+            let error = bounded(move || mount.umount()).expect_err("busy unmount succeeded");
+            assert_eq!(error.raw_os_error(), Some(libc::EBUSY));
+            nix::mount::unmount(path, nix::mount::MntFlags::MNT_FORCE)?;
+            drop(busy);
+            bounded(move || worker.join().expect("session thread panicked"))
+        })
     }
 }

@@ -38,6 +38,6 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub(crate) fn fuse_mount(mountpoint: *const c_char, args: *mut fuse_args) -> *mut libc::c_void;
     pub(crate) fn fuse_chan_fd(channel: *mut libc::c_void) -> c_int;
-    pub(crate) fn fuse_unmount(mountpoint: *const c_char, channel: *mut libc::c_void);
+    pub(crate) fn fuse_chan_destroy(channel: *mut libc::c_void);
     pub(crate) fn fuse_opt_free_args(args: *mut fuse_args);
 }

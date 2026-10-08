@@ -2,6 +2,7 @@
 
 ## Unreleased
 * Fix mounting kernel-backed filesystems with macFUSE 5.
+* Fix macFUSE teardown hanging in DiskArbitration and leaking a device descriptor after unmount.
 
 ## 0.18.0 - 2026-07-22
 * Remove deprecated feature flags `abi-*`
